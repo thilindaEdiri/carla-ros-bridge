@@ -121,7 +121,7 @@ class EgoVehicle(Vehicle):
         :return:
         """
         vehicle_status = CarlaEgoVehicleStatus(
-            header=self.get_msg_header("map", timestamp=timestamp))
+            header=self.get_msg_header("carla_map", timestamp=timestamp))
         vehicle_status.velocity = self.get_vehicle_speed_abs(self.carla_actor)
         vehicle_status.acceleration.linear = self.get_current_ros_accel().linear
         vehicle_status.orientation = self.get_current_ros_pose().orientation
@@ -135,7 +135,7 @@ class EgoVehicle(Vehicle):
         self.vehicle_status_publisher.publish(vehicle_status)
         
         vehicle_steering = CarlaEgoVehicleSteering(
-            header=self.get_msg_header("map", timestamp=timestamp))
+            header=self.get_msg_header("carla_map", timestamp=timestamp))
         wheel_fl_angle = self.carla_actor.get_wheel_steer_angle(
             VehicleWheelLocation.FL_Wheel)
         wheel_fr_angle = self.carla_actor.get_wheel_steer_angle(

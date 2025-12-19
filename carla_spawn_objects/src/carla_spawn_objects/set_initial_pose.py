@@ -40,7 +40,7 @@ class SetInitialPose(CompatibleNode):
 
         self.initial_pose_subscriber = self.new_subscription(
             PoseWithCovarianceStamped,
-            "/initialpose",
+            "/initpose",
             self.intial_pose_callback,
             qos_profile=10)
 

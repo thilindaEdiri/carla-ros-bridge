@@ -116,11 +116,11 @@ class Sensor(Actor):
             if self.parent is not None:
                 frame_id = self.parent.get_prefix()
             else:
-                frame_id = "map"
+                frame_id = "carla_map"
 
         else:
             child_frame_id = self.get_prefix()
-            frame_id = "map"
+            frame_id = "carla_map"
 
         transform = tf2_ros.TransformStamped()
         transform.header.stamp = roscomp.ros_timestamp(sec=timestamp, from_sec=True)
