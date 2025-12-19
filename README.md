@@ -1,9 +1,8 @@
-# TUM-FTM Fork of the official ROS/ROS2 bridge for CARLA simulator
+# Fork of the official ROS/ROS2 bridge for CARLA simulator
 This bridge was modified for the carla-autoware-bridge.
-You can find the README here: [carla-autoware-bridge](https://github.com/TUMFTM/Carla-Autoware-Bridge)
 
 
-**This version requires CARLA 0.9.15**
+**This version requires CARLA 0.9.16**
 
 ## Officiel documentation of the carla ros bridge
 
