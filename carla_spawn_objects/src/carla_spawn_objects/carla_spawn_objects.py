@@ -56,7 +56,7 @@ class CarlaSpawnObjects(CompatibleNode):
         self.spawn_object_service = self.new_client(SpawnObject, "/carla/spawn_object")
         self.destroy_object_service = self.new_client(DestroyObject, "/carla/destroy_object")
 
-    def spawn_object(self, spawn_object_request):
+    def spawn_object(self, spawn_object_request, raise_on_fail=True):
         response_id = -1
         response = self.call_service(self.spawn_object_service, spawn_object_request, spin_until_response_received=True)
         response_id = response.id
@@ -64,9 +64,10 @@ class CarlaSpawnObjects(CompatibleNode):
             self.loginfo("Object (type='{}', id='{}') spawned successfully as {}.".format(
                 spawn_object_request.type, spawn_object_request.id, response_id))
         else:
-            self.logwarn("Error while spawning object (type='{}', id='{}').".format(
-                spawn_object_request.type, spawn_object_request.id))
-            raise RuntimeError(response.error_string)
+            self.logwarn("Error while spawning object (type='{}', id='{}'): {}".format(
+                spawn_object_request.type, spawn_object_request.id, response.error_string))
+            if raise_on_fail:
+                raise RuntimeError(response.error_string)
         return response_id
 
     def spawn_objects(self):
@@ -134,62 +135,67 @@ class CarlaSpawnObjects(CompatibleNode):
                 spawn_object_request.type = vehicle["type"]
                 spawn_object_request.id = vehicle["id"]
                 spawn_object_request.attach_to = 0
-                spawn_object_request.random_pose = False
                 for attribute, value in vehicle["attributes"].items():
                     spawn_object_request.attributes.append(
                         KeyValue(key=str(attribute), value=str(value)))
 
                 spawn_point = None
+                spawn_point_source = None
 
                 # check if there's a spawn_point corresponding to this vehicle
                 spawn_point_param = self.get_param("spawn_point_" + vehicle["id"], None)
-                spawn_param_used = False
-                if (spawn_point_param is not None):
-                    # try to use spawn_point from parameters
+                if spawn_point_param is not None:
                     spawn_point = self.check_spawn_point_param(spawn_point_param)
-                    if spawn_point is None:
-                        self.logwarn("{}: Could not use spawn point from parameters, ".format(vehicle["id"]) +
-                                     "the spawn point from config file will be used.")
+                    if spawn_point is not None:
+                        spawn_point_source = "ros parameters"
                     else:
-                        self.loginfo("Spawn point from ros parameters")
-                        spawn_param_used = True
+                        # invalid/empty param: keep going and try config file
+                        self.logwarn("{}: Could not use spawn point from parameters, the spawn point from config file will be used.".format(
+                            vehicle["id"]))
 
-                if "spawn_point" in vehicle and spawn_param_used is False:
+                if spawn_point is None and "spawn_point" in vehicle:
                     # get spawn point from config file
                     try:
-                        spawn_point = self.create_spawn_point(
-                            vehicle["spawn_point"]["x"],
-                            vehicle["spawn_point"]["y"],
-                            vehicle["spawn_point"]["z"],
-                            vehicle["spawn_point"]["roll"],
-                            vehicle["spawn_point"]["pitch"],
-                            vehicle["spawn_point"]["yaw"]
-                        )
-                        self.loginfo("Spawn point from configuration file")
+                        spawn_point = self.create_spawn_point_from_config(vehicle["spawn_point"])
+                        spawn_point_source = "configuration file"
                     except KeyError as e:
-                        self.logerr("{}: Could not use the spawn point from config file, ".format(vehicle["id"]) +
-                                    "the mandatory attribute {} is missing, a random spawn point will be used".format(e))
+                        self.logerr("{}: Could not use the spawn point from config file, mandatory attribute {} is missing; a random spawn point will be used".format(
+                            vehicle["id"], e))
+                        spawn_point = None
+                        spawn_point_source = None
+                    except (TypeError, ValueError) as e:
+                        self.logerr("{}: Could not parse the spawn point from config file ({}); a random spawn point will be used".format(
+                            vehicle["id"], e))
+                        spawn_point = None
+                        spawn_point_source = None
 
                 if spawn_point is None:
                     # pose not specified, ask for a random one in the service call
                     self.loginfo("Spawn point selected at random")
-                    spawn_point = Pose()  # empty pose
                     spawn_object_request.random_pose = True
-
-                player_spawned = False
-                while not player_spawned and roscomp.ok():
+                    spawn_object_request.transform = Pose()  # empty pose
+                else:
+                    self.loginfo("Spawn point from {}".format(spawn_point_source))
+                    spawn_object_request.random_pose = False
                     spawn_object_request.transform = spawn_point
 
-                    response_id = self.spawn_object(spawn_object_request)
-                    if response_id != -1:
-                        player_spawned = True
-                        self.players.append(response_id)
-                        # Set up the sensors
-                        try:
-                            self.setup_sensors(vehicle["sensors"], response_id)
-                        except KeyError:
-                            self.logwarn(
-                                "Object (type='{}', id='{}') has no 'sensors' field in his config file, none will be spawned.".format(spawn_object_request.type, spawn_object_request.id))
+                # Spawn vehicle. If a fixed spawn point fails (e.g. collision), fall back to random.
+                response_id = self.spawn_object(spawn_object_request, raise_on_fail=False)
+                if response_id == -1 and spawn_object_request.random_pose is False:
+                    self.logwarn("{}: Failed to spawn at configured spawn point; falling back to random spawn point.".format(
+                        vehicle["id"]))
+                    spawn_object_request.random_pose = True
+                    spawn_object_request.transform = Pose()
+                    response_id = self.spawn_object(spawn_object_request, raise_on_fail=True)
+
+                if response_id != -1:
+                    self.players.append(response_id)
+                    # Set up the sensors
+                    try:
+                        self.setup_sensors(vehicle["sensors"], response_id)
+                    except KeyError:
+                        self.logwarn(
+                            "Object (type='{}', id='{}') has no 'sensors' field in his config file, none will be spawned.".format(spawn_object_request.type, spawn_object_request.id))
 
     def setup_sensors(self, sensors, attached_vehicle_id=None):
         """
@@ -215,26 +221,14 @@ class CarlaSpawnObjects(CompatibleNode):
 
                 if attached_vehicle_id is None and "pseudo" not in sensor_type:
                     spawn_point = sensor_spec.pop("spawn_point")
-                    sensor_transform = self.create_spawn_point(
-                        spawn_point.pop("x"),
-                        spawn_point.pop("y"),
-                        spawn_point.pop("z"),
-                        spawn_point.pop("roll", 0.0),
-                        spawn_point.pop("pitch", 0.0),
-                        spawn_point.pop("yaw", 0.0))
+                    sensor_transform = self.create_spawn_point_from_config(spawn_point)
                 else:
                     # if sensor attached to a vehicle, or is a 'pseudo_actor', allow default pose
                     spawn_point = sensor_spec.pop("spawn_point", 0)
                     if spawn_point == 0:
                         sensor_transform = self.create_spawn_point(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
                     else:
-                        sensor_transform = self.create_spawn_point(
-                            spawn_point.pop("x", 0.0),
-                            spawn_point.pop("y", 0.0),
-                            spawn_point.pop("z", 0.0),
-                            spawn_point.pop("roll", 0.0),
-                            spawn_point.pop("pitch", 0.0),
-                            spawn_point.pop("yaw", 0.0))
+                        sensor_transform = self.create_spawn_point_from_config(spawn_point, allow_missing_position=True)
 
                 spawn_object_request = roscomp.get_service_request(SpawnObject)
                 spawn_object_request.type = sensor_type
@@ -295,8 +289,72 @@ class CarlaSpawnObjects(CompatibleNode):
         spawn_point.orientation.z = quat[3]
         return spawn_point
 
+    def create_spawn_point_from_config(self, spawn_point_config, allow_missing_position=False):
+        """
+        Create a geometry_msgs/Pose from a spawn_point dict.
+
+        Supported formats:
+          - Euler angles (degrees):
+              {"x":..., "y":..., "z":..., "roll":..., "pitch":..., "yaw":...}
+            roll/pitch/yaw are optional and default to 0.0.
+
+          - Quaternion:
+              {"x":..., "y":..., "z":..., "orientation": {"x":..., "y":..., "z":..., "w":...}}
+            If 'orientation' is present, it is used directly.
+        """
+        if not isinstance(spawn_point_config, dict):
+            raise TypeError("spawn_point must be a dict, got {}".format(type(spawn_point_config)))
+
+        pose = Pose()
+
+        # Position
+        if allow_missing_position:
+            pose.position.x = float(spawn_point_config.get("x", 0.0))
+            pose.position.y = float(spawn_point_config.get("y", 0.0))
+            pose.position.z = float(spawn_point_config.get("z", 0.0))
+        else:
+            pose.position.x = float(spawn_point_config["x"])
+            pose.position.y = float(spawn_point_config["y"])
+            pose.position.z = float(spawn_point_config["z"])
+
+        # Orientation: quaternion preferred if provided
+        if "orientation" in spawn_point_config and spawn_point_config["orientation"] is not None:
+            ori = spawn_point_config["orientation"]
+            if not isinstance(ori, dict):
+                raise TypeError("spawn_point.orientation must be a dict, got {}".format(type(ori)))
+            pose.orientation.x = float(ori["x"])
+            pose.orientation.y = float(ori["y"])
+            pose.orientation.z = float(ori["z"])
+            pose.orientation.w = float(ori["w"])
+            return pose
+
+        # Fallback: Euler degrees
+        roll = float(spawn_point_config.get("roll", 0.0))
+        pitch = float(spawn_point_config.get("pitch", 0.0))
+        yaw = float(spawn_point_config.get("yaw", 0.0))
+        quat = euler2quat(math.radians(roll), math.radians(pitch), math.radians(yaw))
+        pose.orientation.w = quat[0]
+        pose.orientation.x = quat[1]
+        pose.orientation.y = quat[2]
+        pose.orientation.z = quat[3]
+        return pose
+
     def check_spawn_point_param(self, spawn_point_parameter):
-        components = spawn_point_parameter.split(',')
+        if spawn_point_parameter is None:
+            return None
+
+        # ROS2 launch files in some setups pass the string "None" by default. Treat that as unset.
+        if isinstance(spawn_point_parameter, str):
+            value = spawn_point_parameter.strip()
+            if value == "" or value.lower() in ("none", "null"):
+                return None
+            components = value.split(',')
+        elif isinstance(spawn_point_parameter, (list, tuple)):
+            components = list(spawn_point_parameter)
+        else:
+            self.logwarn("Invalid spawnpoint '{}'".format(spawn_point_parameter))
+            return None
+
         if len(components) != 6:
             self.logwarn("Invalid spawnpoint '{}'".format(spawn_point_parameter))
             return None
