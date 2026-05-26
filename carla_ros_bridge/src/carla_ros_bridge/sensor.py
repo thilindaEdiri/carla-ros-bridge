@@ -151,17 +151,30 @@ class Sensor(Actor):
 
     def destroy(self):
         """
-        Function (override) to destroy this object.
+        Stop listening and destroy this bridge sensor.
 
-        Stop listening to the carla.Sensor actor.
-        Finally forward call to super class.
-
-        :return:
+        Tolerates the parent CARLA actor already being destroyed (another client
+        or Scenario Runner removed the vehicle first).
         """
         self._callback_active.acquire()
-        if self.carla_actor.is_listening:
-            self.carla_actor.stop()
-        super(Sensor, self).destroy()
+        try:
+            if self.carla_actor is not None:
+                try:
+                    if self.carla_actor.is_alive and self.carla_actor.is_listening:
+                        self.carla_actor.stop()
+                except (RuntimeError, OSError) as exc:
+                    self.node.logwarn(
+                        "Sensor %s: stop ignored (%s)", self.uid, exc)
+        finally:
+            try:
+                self._callback_active.release()
+            except RuntimeError:
+                pass
+        try:
+            super(Sensor, self).destroy()
+        except (RuntimeError, OSError) as exc:
+            self.node.logwarn(
+                "Sensor %s: super.destroy ignored (%s)", self.uid, exc)
 
     def _callback_sensor_data(self, carla_sensor_data):
         """

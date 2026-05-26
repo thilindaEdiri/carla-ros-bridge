@@ -145,7 +145,7 @@ class ActorFactory(object):
             for actor_id in self.actors:
                 try:
                     self.actors[actor_id].update(frame_id, timestamp)
-                except RuntimeError as e:
+                except (RuntimeError, OSError) as e:
                     self.node.logwarn("Update actor {}({}) failed: {}".format(
                         self.actors[actor_id].__class__.__name__, actor_id, e))
                     continue
@@ -271,10 +271,22 @@ class ActorFactory(object):
         carla_actor = None
         if isinstance(actor, Actor):
             carla_actor = actor.carla_actor
-        actor.destroy()
+        try:
+            actor.destroy()
+        except (RuntimeError, OSError) as exc:
+            self.node.logwarn(
+                "Removed bridge object %s(id=%s) with destroy error: %s",
+                actor.__class__.__name__, actor_id, exc)
+        else:
+            self.node.loginfo(
+                "Removed {}(id={})".format(actor.__class__.__name__, actor.uid))
         if carla_actor and delete_actor:
-            carla_actor.destroy()
-        self.node.loginfo("Removed {}(id={})".format(actor.__class__.__name__, actor.uid))
+            try:
+                if carla_actor.is_alive:
+                    carla_actor.destroy()
+            except (RuntimeError, OSError) as exc:
+                self.node.logwarn(
+                    "CARLA destroy actor id=%s ignored: %s", actor_id, exc)
 
     def get_pseudo_sensor_types(self):
         pseudo_sensors = []
