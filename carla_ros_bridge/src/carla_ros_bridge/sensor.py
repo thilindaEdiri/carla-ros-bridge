@@ -164,7 +164,7 @@ class Sensor(Actor):
                         self.carla_actor.stop()
                 except (RuntimeError, OSError) as exc:
                     self.node.logwarn(
-                        "Sensor %s: stop ignored (%s)", self.uid, exc)
+                        "Sensor {}: stop ignored ({})".format(self.uid, exc))
         finally:
             try:
                 self._callback_active.release()
@@ -174,7 +174,7 @@ class Sensor(Actor):
             super(Sensor, self).destroy()
         except (RuntimeError, OSError) as exc:
             self.node.logwarn(
-                "Sensor %s: super.destroy ignored (%s)", self.uid, exc)
+                "Sensor {}: super.destroy ignored ({})".format(self.uid, exc))
 
     def _callback_sensor_data(self, carla_sensor_data):
         """

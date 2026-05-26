@@ -275,8 +275,8 @@ class ActorFactory(object):
             actor.destroy()
         except (RuntimeError, OSError) as exc:
             self.node.logwarn(
-                "Removed bridge object %s(id=%s) with destroy error: %s",
-                actor.__class__.__name__, actor_id, exc)
+                "Removed bridge object {}(id={}) with destroy error: {}".format(
+                    actor.__class__.__name__, actor_id, exc))
         else:
             self.node.loginfo(
                 "Removed {}(id={})".format(actor.__class__.__name__, actor.uid))
@@ -286,7 +286,7 @@ class ActorFactory(object):
                     carla_actor.destroy()
             except (RuntimeError, OSError) as exc:
                 self.node.logwarn(
-                    "CARLA destroy actor id=%s ignored: %s", actor_id, exc)
+                    "CARLA destroy actor id={} ignored: {}".format(actor_id, exc))
 
     def get_pseudo_sensor_types(self):
         pseudo_sensors = []
