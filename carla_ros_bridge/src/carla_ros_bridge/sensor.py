@@ -106,6 +106,10 @@ class Sensor(Actor):
         elif ROS_VERSION == 2:
             self._tf_broadcaster = tf2_ros.TransformBroadcaster(node)
 
+    def _uses_sensor_tick_throttle(self):
+        """True when sensor_tick > 0"""
+        return self.sensor_tick_time is not None and self.sensor_tick_time > 0.0
+
     def get_ros_transform(self, pose, timestamp):
         if self.synchronous_mode:
             if not self.relative_spawn_pose:
@@ -187,7 +191,7 @@ class Sensor(Actor):
             # if acquire fails, sensor is currently getting destroyed
             return
         if self.synchronous_mode:
-            if self.sensor_tick_time:
+            if self._uses_sensor_tick_throttle():
                 self.next_data_expected_time = carla_sensor_data.timestamp + \
                     float(self.sensor_tick_time)
             self.queue.put(carla_sensor_data)
@@ -231,7 +235,57 @@ class Sensor(Actor):
             except queue.Empty:
                 return
 
+    def _process_synchronous_sensor_sample(self, carla_sensor_data, frame, timestamp):
+        self.node.logdebug("{}({}): process {}".format(
+            self.__class__.__name__, self.get_id(), carla_sensor_data.frame))
+        self.publish_tf(trans.carla_transform_to_ros_pose(
+            carla_sensor_data.transform), timestamp)
+        self.sensor_data_updated(carla_sensor_data)
+
+    def _update_synchronous_rgb_camera(self, frame, timestamp):
+        """
+        RgbCamera with sensor_tick > 0 may deliver images one tick after world.tick().
+        Do not block the tick loop or require an exact frame id match.
+        """
+        ready = (
+            not self.queue.empty()
+            or not self.next_data_expected_time
+            or self.next_data_expected_time < timestamp
+        )
+        if not ready:
+            return
+
+        pending_future = []
+        best = None
+        while True:
+            try:
+                carla_sensor_data = self.queue.get(block=False)
+            except queue.Empty:
+                break
+            if carla_sensor_data.frame <= frame:
+                if best is None or carla_sensor_data.frame > best.frame:
+                    best = carla_sensor_data
+            else:
+                pending_future.append(carla_sensor_data)
+
+        for item in pending_future:
+            self.queue.put(item)
+
+        if best is not None:
+            if best.frame != frame:
+                self.node.logdebug(
+                    "{}({}): processing frame {} on world frame {}".format(
+                        self.__class__.__name__, self.get_id(), best.frame, frame))
+
+            self.publish_tf(trans.carla_transform_to_ros_pose(
+                best.transform), timestamp)
+            self.sensor_data_updated(best)
+
     def _update_synchronous_sensor(self, frame, timestamp):
+        if self.__class__.__name__ == "RgbCamera" and self._uses_sensor_tick_throttle():
+            self._update_synchronous_rgb_camera(frame, timestamp)
+            return
+
         while not self.next_data_expected_time or \
             (not self.queue.empty() or
              self.next_data_expected_time and
