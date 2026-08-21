@@ -22,6 +22,8 @@ import sys
 from abc import abstractmethod
 from threading import Lock
 
+import numpy
+
 import carla_common.transforms as trans
 import ros_compatibility as roscomp
 import tf2_ros
@@ -41,6 +43,19 @@ _DATATYPES[PointField.INT32] = ('i', 4)
 _DATATYPES[PointField.UINT32] = ('I', 4)
 _DATATYPES[PointField.FLOAT32] = ('f', 4)
 _DATATYPES[PointField.FLOAT64] = ('d', 8)
+
+# numpy equivalents of the above, used by pointcloud_dtype() to describe the same
+# wire layout to numpy so a cloud can be serialised without a per-point loop.
+_NUMPY_DATATYPES = {
+    PointField.INT8: 'i1',
+    PointField.UINT8: 'u1',
+    PointField.INT16: 'i2',
+    PointField.UINT16: 'u2',
+    PointField.INT32: 'i4',
+    PointField.UINT32: 'u4',
+    PointField.FLOAT32: 'f4',
+    PointField.FLOAT64: 'f8',
+}
 
 
 class Sensor(Actor):
@@ -377,3 +392,85 @@ def create_cloud(header, fields, points):
                        point_step=cloud_struct.size,
                        row_step=cloud_struct.size * len(points),
                        data=buff.raw)
+
+
+def pointcloud_dtype(fields, is_bigendian=False):
+    """
+    Build the numpy structured dtype that matches a PointCloud2 field layout exactly.
+
+    The returned dtype has the same per-field offsets and the same itemsize as the
+    struct format L{create_cloud} would use, so an array of this dtype can be handed
+    straight to L{create_cloud_vectorized}.
+
+    @param fields: The point cloud fields.
+    @type  fields: iterable of L{sensor_msgs.msg.PointField}
+    @param is_bigendian: Whether the wire layout is big endian.
+    @type  is_bigendian: bool
+    @return: A structured dtype describing one point.
+    @rtype:  L{numpy.dtype}
+    """
+    byteorder = '>' if is_bigendian else '<'
+
+    names, formats, offsets = [], [], []
+    for field in sorted(fields, key=lambda f: f.offset):
+        if field.datatype not in _NUMPY_DATATYPES:
+            raise ValueError(
+                'PointField "{}" has unsupported datatype {}'.format(field.name, field.datatype))
+        base = byteorder + _NUMPY_DATATYPES[field.datatype]
+        names.append(field.name)
+        formats.append(base if field.count == 1 else (base, (field.count,)))
+        offsets.append(field.offset)
+
+    return numpy.dtype({
+        'names': names,
+        'formats': formats,
+        'offsets': offsets,
+        # Take the itemsize from the struct format so any trailing padding in the
+        # declared layout is reproduced here too.
+        'itemsize': struct.calcsize(_get_struct_fmt(is_bigendian, fields)),
+    })
+
+
+def create_cloud_vectorized(header, fields, points, is_bigendian=False):
+    """
+    Create a L{sensor_msgs.msg.PointCloud2} message from a pre-laid-out numpy array.
+
+    Equivalent to L{create_cloud}, but the caller has already arranged the points in
+    an array whose dtype matches C{fields} byte for byte, so serialising is a single
+    buffer copy instead of one C{struct.pack_into} call per point. For lidar-sized
+    clouds that is the difference between tens of milliseconds and a fraction of one,
+    which matters because in synchronous mode the simulator blocks until the bridge
+    has finished handling every sensor of the frame.
+
+    @param header: The point cloud header.
+    @type  header: L{std_msgs.msg.Header}
+    @param fields: The point cloud fields.
+    @type  fields: iterable of L{sensor_msgs.msg.PointField}
+    @param points: One entry per point, with dtype C{pointcloud_dtype(fields)}.
+    @type  points: L{numpy.ndarray}
+    @param is_bigendian: Whether the wire layout is big endian.
+    @type  is_bigendian: bool
+    @return: The point cloud.
+    @rtype:  L{sensor_msgs.msg.PointCloud2}
+    """
+    expected = pointcloud_dtype(fields, is_bigendian)
+    if points.dtype != expected:
+        # Guard rather than fall back: a mismatch here would put wrongly laid out
+        # bytes on the wire, which subscribers cannot detect.
+        raise ValueError(
+            'points.dtype {} does not match the declared fields (expected {}); '
+            'build the array with pointcloud_dtype(fields)'.format(points.dtype, expected))
+
+    points = numpy.ascontiguousarray(points.reshape(-1))
+    point_count = int(points.shape[0])
+    point_step = expected.itemsize
+
+    return PointCloud2(header=header,
+                       height=1,
+                       width=point_count,
+                       is_dense=False,
+                       is_bigendian=is_bigendian,
+                       fields=fields,
+                       point_step=point_step,
+                       row_step=point_step * point_count,
+                       data=points.tobytes())
